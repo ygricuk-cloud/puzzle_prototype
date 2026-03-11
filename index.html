@@ -1,0 +1,30 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>7x8 Grid Puzzle Prototype</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app">
+    <h1>7x8 Grid Puzzle Prototype</h1>
+    <p class="hint">Merge equal tiers by dropping one block directly onto another block of the same tier. Win when one Tier 13 block remains.</p>
+    <div class="controls">
+      <button id="level1Button" type="button">Level 1</button>
+      <button id="level2Button" type="button">Level 2</button>
+      <button id="restartButton" type="button">Restart</button>
+    </div>
+    <section class="debug" aria-live="polite">
+      <div id="currentLevelText">Current level: 1</div>
+      <div id="statusText">Status: In progress</div>
+      <div id="blockCountText">Blocks: 0</div>
+      <div id="tierCountText">Tier counts: -</div>
+      <div id="goalsText" hidden>Goals: -</div>
+    </section>
+    <div id="board" aria-label="7 by 8 puzzle board"></div>
+  </main>
+
+  <script src="game.js"></script>
+</body>
+</html>
