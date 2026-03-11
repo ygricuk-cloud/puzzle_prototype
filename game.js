@@ -352,6 +352,283 @@ class BoardLogic {
     };
   }
 
+  getOverlapCellCountsFromOccupancy(occupancy, x, y, width, height) {
+    const counts = {};
+    if (!this.canPlaceOnGrid(this.createEmptyGrid(), x, y, width, height)) {
+      return counts;
+    }
+
+    for (let cy = y; cy < y + height; cy += 1) {
+      for (let cx = x; cx < x + width; cx += 1) {
+        const found = occupancy[cy][cx];
+        if (found !== null) {
+          counts[found] = (counts[found] || 0) + 1;
+        }
+      }
+    }
+    return counts;
+  }
+
+  getCellsForRect(x, y, width, height) {
+    const cells = [];
+    for (let cy = y; cy < y + height; cy += 1) {
+      for (let cx = x; cx < x + width; cx += 1) {
+        cells.push({ x: cx, y: cy });
+      }
+    }
+    return cells;
+  }
+
+  resolveDropDeterministic(blockId, startX, startY, intendedX, intendedY) {
+    const moved = this.getBlockById(blockId);
+    if (!moved) {
+      return {
+        result: "rejected:missing_block",
+        finalOutcome: "reject",
+        originalAnchor: { x: startX, y: startY },
+        snappedAnchor: { x: startX, y: startY },
+        pathValid: false,
+        draggedFinalCells: [],
+        overlappedBlockIds: [],
+        overlappedBlockTiers: [],
+        mergeCandidateChosen: false,
+        upgradedFootprintValid: null,
+        snappedX: startX,
+        snappedY: startY
+      };
+    }
+
+    const snapped = this.clampAnchorForBlock(moved, intendedX, intendedY);
+    const draggedFinalCells = this.getCellsForRect(snapped.x, snapped.y, moved.width, moved.height);
+    const occupancyWithoutMoved = this.buildOccupancyGrid(new Set([moved.id]));
+
+    let currentX = startX;
+    let currentY = startY;
+    let lastValidX = startX;
+    let lastValidY = startY;
+    let pathReachedTarget = currentX === snapped.x && currentY === snapped.y;
+    let contactOverlapCounts = {};
+    let contactOverlapIds = [];
+    let mergeTarget = null;
+    let blockedByObstacle = false;
+
+    while (!pathReachedTarget) {
+      const dx = snapped.x - currentX;
+      const dy = snapped.y - currentY;
+      const primaryAxis = Math.abs(dx) >= Math.abs(dy) ? "x" : "y";
+      const secondaryAxis = primaryAxis === "x" ? "y" : "x";
+      const axes = [primaryAxis, secondaryAxis];
+      let stepped = false;
+
+      for (const axis of axes) {
+        const step = axis === "x" ? Math.sign(snapped.x - currentX) : Math.sign(snapped.y - currentY);
+        if (step === 0) {
+          continue;
+        }
+
+        const nextX = axis === "x" ? currentX + step : currentX;
+        const nextY = axis === "y" ? currentY + step : currentY;
+
+        if (!this.canPlaceOnGrid(this.createEmptyGrid(), nextX, nextY, moved.width, moved.height)) {
+          continue;
+        }
+
+        const overlapCounts = this.getOverlapCellCountsFromOccupancy(
+          occupancyWithoutMoved,
+          nextX,
+          nextY,
+          moved.width,
+          moved.height
+        );
+        const overlapIds = Object.keys(overlapCounts);
+
+        if (overlapIds.length === 0) {
+          currentX = nextX;
+          currentY = nextY;
+          lastValidX = nextX;
+          lastValidY = nextY;
+          stepped = true;
+          break;
+        }
+
+        // First contacted obstacle on the chosen step.
+        contactOverlapCounts = overlapCounts;
+        contactOverlapIds = overlapIds;
+        if (overlapIds.length === 1) {
+          const candidate = this.getBlockById(overlapIds[0]);
+          if (candidate && candidate.tier === moved.tier) {
+            mergeTarget = candidate;
+            blockedByObstacle = true;
+            break;
+          }
+        }
+
+        // Not mergeable on this axis, try alternate axis.
+        continue;
+      }
+
+      if (mergeTarget) {
+        break;
+      }
+
+      if (!stepped) {
+        blockedByObstacle = true;
+        break;
+      }
+
+      pathReachedTarget = currentX === snapped.x && currentY === snapped.y;
+    }
+
+    pathReachedTarget = currentX === snapped.x && currentY === snapped.y;
+
+    const overlappedBlockTiers = contactOverlapIds
+      .map((id) => this.getBlockById(id))
+      .filter(Boolean)
+      .map((block) => block.tier);
+    const overlapCellCount = Object.values(contactOverlapCounts).reduce((sum, count) => sum + count, 0);
+
+    if (!mergeTarget) {
+      moved.x = lastValidX;
+      moved.y = lastValidY;
+      this.occupancyGrid = this.buildOccupancyGrid();
+      return {
+        result: "move_success",
+        finalOutcome: "move",
+        originalAnchor: { x: startX, y: startY },
+        snappedAnchor: { x: snapped.x, y: snapped.y },
+        pathValid: pathReachedTarget,
+        draggedFinalCells,
+        overlappedBlockIds: contactOverlapIds,
+        overlappedBlockTiers,
+        mergeCandidateChosen: false,
+        upgradedFootprintValid: null,
+        snappedX: snapped.x,
+        snappedY: snapped.y,
+        overlappedBlockId: contactOverlapIds.length === 1 ? contactOverlapIds[0] : (contactOverlapIds.length > 1 ? `multiple:${contactOverlapIds.join(",")}` : null),
+        overlappedBlockTier: contactOverlapIds.length === 1 && overlappedBlockTiers.length === 1 ? overlappedBlockTiers[0] : null,
+        overlappedCellCount: overlapCellCount
+      };
+    }
+
+    const target = mergeTarget;
+    const targetId = target.id;
+    const nextTier = moved.tier + 1;
+    const nextDef = this.tierDefs[nextTier];
+    if (!nextDef) {
+      moved.x = lastValidX;
+      moved.y = lastValidY;
+      this.occupancyGrid = this.buildOccupancyGrid();
+      return {
+        result: "rejected:missing_next_tier",
+        finalOutcome: "reject",
+        originalAnchor: { x: startX, y: startY },
+        snappedAnchor: { x: snapped.x, y: snapped.y },
+        pathValid: pathReachedTarget,
+        draggedFinalCells,
+        overlappedBlockIds: [targetId],
+        overlappedBlockTiers: [target.tier],
+        mergeCandidateChosen: true,
+        upgradedFootprintValid: null,
+        snappedX: snapped.x,
+        snappedY: snapped.y,
+        overlappedBlockId: targetId,
+        overlappedBlockTier: target.tier,
+        overlappedCellCount: overlapCellCount
+      };
+    }
+
+    const mergeAnchor = { x: target.x, y: target.y };
+    const upgradedCells = this.getCellsForRect(mergeAnchor.x, mergeAnchor.y, nextDef.width, nextDef.height);
+    const previousBlocks = this.blocks.slice();
+    const sourceCellsRemovedBeforeFitCheck = true;
+
+    // Remove both sources from board state before upgraded fit-check.
+    this.blocks = this.blocks.filter((block) => block.id !== moved.id && block.id !== target.id);
+    this.occupancyGrid = this.buildOccupancyGrid();
+
+    const mergedFits = this.canPlaceOnGrid(
+      this.occupancyGrid,
+      mergeAnchor.x,
+      mergeAnchor.y,
+      nextDef.width,
+      nextDef.height
+    );
+    if (!mergedFits) {
+      this.blocks = previousBlocks;
+      moved.x = lastValidX;
+      moved.y = lastValidY;
+      this.occupancyGrid = this.buildOccupancyGrid();
+      return {
+        result: "rejected:upgraded_does_not_fit",
+        finalOutcome: "reject",
+        originalAnchor: { x: startX, y: startY },
+        snappedAnchor: { x: snapped.x, y: snapped.y },
+        pathValid: pathReachedTarget,
+        draggedFinalCells,
+        overlappedBlockIds: [targetId],
+        overlappedBlockTiers: [target.tier],
+        mergeCandidateChosen: true,
+        upgradedFootprintValid: false,
+        mergeDebug: {
+          draggedBlockId: moved.id,
+          draggedBlockTier: moved.tier,
+          draggedAnchor: { x: snapped.x, y: snapped.y },
+          targetBlockId: target.id,
+          targetBlockTier: target.tier,
+          targetAnchor: { x: target.x, y: target.y },
+          mergeAnchor,
+          sourceCellsRemovedBeforeFitCheck,
+          upgradedTier: nextTier,
+          upgradedFootprintCells: upgradedCells,
+          fitCheckResult: false,
+          finalOutcome: "reject"
+        },
+        snappedX: snapped.x,
+        snappedY: snapped.y,
+        overlappedBlockId: targetId,
+        overlappedBlockTier: target.tier,
+        overlappedCellCount: overlapCellCount
+      };
+    }
+
+    const merged = this.createBlock(`merged_${this.nextId++}`, nextTier, mergeAnchor.x, mergeAnchor.y);
+    this.blocks.push(merged);
+    this.occupancyGrid = this.buildOccupancyGrid();
+    return {
+      result: "merge_success",
+      finalOutcome: "merge",
+      originalAnchor: { x: startX, y: startY },
+      snappedAnchor: { x: snapped.x, y: snapped.y },
+      pathValid: pathReachedTarget,
+      draggedFinalCells,
+      overlappedBlockIds: [targetId],
+      overlappedBlockTiers: [target.tier],
+      mergeCandidateChosen: true,
+      upgradedFootprintValid: true,
+      mergeDebug: {
+        draggedBlockId: moved.id,
+        draggedBlockTier: moved.tier,
+        draggedAnchor: { x: snapped.x, y: snapped.y },
+        targetBlockId: target.id,
+        targetBlockTier: target.tier,
+        targetAnchor: { x: target.x, y: target.y },
+        mergeAnchor,
+        sourceCellsRemovedBeforeFitCheck,
+        upgradedTier: nextTier,
+        upgradedFootprintCells: upgradedCells,
+        fitCheckResult: true,
+        finalOutcome: "merge"
+      },
+      snappedX: snapped.x,
+      snappedY: snapped.y,
+      overlappedBlockId: targetId,
+      overlappedBlockTier: target.tier,
+      overlappedCellCount: overlapCellCount,
+      mergedBlockId: merged.id,
+      mergedTier: merged.tier
+    };
+  }
+
   tryMergeOnOverlapDrop(movedId, targetId, fromX, fromY, desiredX, desiredY) {
     const moved = this.getBlockById(movedId);
     if (!moved) {
@@ -642,65 +919,41 @@ function onPointerUp(event) {
   }
 
   const desired = getSnappedAnchorFromPointer(event, block, activeDrag);
-  activeDrag.lastDesiredX = desired.x;
-  activeDrag.lastDesiredY = desired.y;
-
-  const nonOverlapTrace = logic.traceSlidePath(
+  const resolution = logic.resolveDropDeterministic(
     block.id,
     activeDrag.startX,
     activeDrag.startY,
     desired.x,
     desired.y
   );
-  const fallbackX = nonOverlapTrace.x;
-  const fallbackY = nonOverlapTrace.y;
 
-  const overlapCounts = logic.getOverlapCellCountsAtAnchor(block.id, desired.x, desired.y, block.width, block.height);
-  const overlapIds = Object.keys(overlapCounts);
-  let mergeOutcome = "merge_rejected:no_overlap";
-  let overlappedBlockId = null;
-  let overlappedBlockTier = null;
-  let overlappedCellCount = 0;
-
-  if (overlapIds.length === 0) {
-    logic.moveBlock(block.id, fallbackX, fallbackY);
-    mergeOutcome = "merge_rejected:no_overlap";
-  } else if (overlapIds.length > 1) {
-    logic.moveBlock(block.id, fallbackX, fallbackY);
-    mergeOutcome = "merge_rejected:multiple_overlap_targets";
-    overlappedBlockId = `multiple:${overlapIds.join(",")}`;
-    overlappedCellCount = Object.values(overlapCounts).reduce((sum, count) => sum + count, 0);
-  } else {
-    const target = logic.getBlockById(overlapIds[0]);
-    overlappedBlockId = overlapIds[0];
-    overlappedBlockTier = target ? target.tier : null;
-    overlappedCellCount = overlapCounts[overlapIds[0]] || 0;
-    if (!target || target.tier !== block.tier) {
-      logic.moveBlock(block.id, fallbackX, fallbackY);
-      mergeOutcome = "merge_rejected:different_tier_overlap";
-    } else {
-      const mergeResult = logic.tryMergeOnOverlapDrop(
-        block.id,
-        target.id,
-        activeDrag.startX,
-        activeDrag.startY,
-        desired.x,
-        desired.y
-      );
-
-      if (!mergeResult.merged) {
-        logic.moveBlock(block.id, fallbackX, fallbackY);
-        mergeOutcome = `merge_rejected:${mergeResult.reason}`;
-      } else {
-        mergeOutcome = "merge_success";
-        tryCollectGoalFromMergedBlock(mergeResult);
-      }
-    }
+  if (resolution.result === "merge_success") {
+    tryCollectGoalFromMergedBlock({
+      merged: true,
+      mergedBlockId: resolution.mergedBlockId,
+      mergedTier: resolution.mergedTier
+    });
   }
 
   console.log(
-    `[DROP] dragged_tier=${block.tier} snapped=(${desired.x},${desired.y}) overlapped_id=${overlappedBlockId ?? "none"} overlapped_tier=${overlappedBlockTier ?? "none"} overlapped_cells=${overlappedCellCount} result=${mergeOutcome}`
+    `[DROP] dragged_id=${block.id} dragged_tier=${block.tier} snapped=(${resolution.snappedX},${resolution.snappedY}) overlapped_id=${resolution.overlappedBlockId ?? "none"} overlapped_tier=${resolution.overlappedBlockTier ?? "none"} overlapped_cells=${resolution.overlappedCellCount ?? 0} result=${resolution.result}`
   );
+  console.log("[DROP_DEBUG]", {
+    draggedBlockId: block.id,
+    draggedBlockTier: block.tier,
+    originalAnchor: resolution.originalAnchor,
+    snappedAnchor: resolution.snappedAnchor,
+    pathValid: resolution.pathValid,
+    draggedFinalOccupiedCells: resolution.draggedFinalCells,
+    overlappedBlockIds: resolution.overlappedBlockIds,
+    overlappedBlockTiers: resolution.overlappedBlockTiers,
+    mergeCandidateChosen: resolution.mergeCandidateChosen,
+    upgradedFootprintValid: resolution.upgradedFootprintValid,
+    finalOutcome: resolution.finalOutcome
+  });
+  if (resolution.mergeDebug) {
+    console.log("[MERGE_ATTEMPT]", resolution.mergeDebug);
+  }
 
   cleanupDrag(event.pointerId);
   renderer.render(logic.blocks);
@@ -753,9 +1006,7 @@ function getSnappedAnchorFromPointer(event, block, dragState) {
   const snappedX = clamp(Math.round(rawLeft / CELL_SIZE), 0, GRID_COLS - block.width);
   const snappedY = clamp(Math.round(rawTop / CELL_SIZE), 0, GRID_ROWS - block.height);
   return { x: snappedX, y: snappedY };
-}
-
-function renderDebugInfo() {
+}function renderDebugInfo() {
   const tierCounts = logic.getTierCounts();
   const tierLabels = Object.keys(TIER_DEFS)
     .map((tier) => `${tier}:${tierCounts[tier] || 0}`)
@@ -783,3 +1034,4 @@ function renderDebugInfo() {
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
+
